@@ -447,15 +447,30 @@ const handlers = {
     // re-binds `prompt` or `hookInput.command` to a non-string, `.toLowerCase()`
     // can no longer throw a TypeError that the global try/catch would swallow
     // (silently exiting 0 and letting the dangerous command through).
+    //
+    // Output is JSON so this permission hook is compatible with BOTH runtimes:
+    // Claude Code reads `hookSpecificOutput.permissionDecision`, and Cursor's
+    // preToolUse/beforeShellExecution runner requires schema-valid JSON on
+    // stdout (it treats plain text / invalid JSON as a block). The top-level
+    // `permission` mirrors Cursor's native flat field and is ignored by Claude
+    // Code. Emitting text here previously blocked every command under Cursor.
+    const emit = (decision, reason) => {
+      const out = {
+        permission: decision === 'deny' ? 'deny' : 'allow',
+        hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: decision },
+      };
+      if (reason) out.hookSpecificOutput.permissionDecisionReason = reason;
+      console.log(JSON.stringify(out));
+    };
     const cmd = String(hookInput.command || toolInput.command || prompt || '').toLowerCase();
     const dangerous = ['rm -rf /', 'format c:', 'del /s /q c:\\', ':(){:|:&};:'];
     for (const d of dangerous) {
       if (cmd.includes(d)) {
-        console.error(`[BLOCKED] Dangerous command detected: ${d}`);
-        process.exit(1);
+        emit('deny', `Dangerous command detected: ${d}`);
+        return;
       }
     }
-    console.log('[OK] Command validated');
+    emit('allow');
   },
 
   'post-edit': () => {
