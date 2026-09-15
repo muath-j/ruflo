@@ -11,12 +11,17 @@
  * misleading `[OK] Command validated`. Dangerous commands sailed through.
  *
  * This script pipes real-shaped Claude Code PreToolUse JSON into the
- * locally-built handler and asserts:
+ * locally-built handler and asserts (the handler now emits a JSON permission
+ * decision on stdout so the hook works in BOTH Claude Code and Cursor, whose
+ * permission-hook runner requires schema-valid JSON — plain text blocks every
+ * command. The [OK]/[BLOCKED] markers moved to stderr to keep stdout pure):
  *
- *   - dangerous command → exit 1 + `[BLOCKED] Dangerous command detected:`
- *   - innocuous command → exit 0 + `[OK] Command validated`
- *   - empty payload    → exit 0 (no crash, no false positive)
- *   - non-string command field → exit 0 (defensive String() wrap holds)
+ *   - dangerous command → stderr `[BLOCKED] Dangerous command detected:` +
+ *                         stdout `"permissionDecision":"deny"` (exit 0)
+ *   - innocuous command → stderr `[OK] Command validated` +
+ *                         stdout `"permissionDecision":"allow"` (exit 0)
+ *   - empty payload    → exit 0 + allow (no crash, no false positive)
+ *   - non-string command field → exit 0 + allow (defensive String() wrap holds)
  *
  * Runs against BOTH copies of the handler in the repo:
  *   1. v3/@claude-flow/cli/.claude/helpers/hook-handler.cjs  (the published template)
@@ -39,19 +44,22 @@ const cases = [
   {
     name: 'dangerous rm -rf / → BLOCKED',
     input: { tool_name: 'Bash', tool_input: { command: 'rm -rf / --no-preserve-root' } },
-    expectExit: 1,
+    expectExit: 0,
     expectStderrIncludes: '[BLOCKED]',
+    expectStdoutIncludes: '"permissionDecision":"deny"',
   },
   {
     name: 'innocuous ls -la → OK',
     input: { tool_name: 'Bash', tool_input: { command: 'ls -la' } },
     expectExit: 0,
-    expectStdoutIncludes: '[OK] Command validated',
+    expectStderrIncludes: '[OK] Command validated',
+    expectStdoutIncludes: '"permissionDecision":"allow"',
   },
   {
     name: 'empty payload → no crash, no false block',
     input: {},
     expectExit: 0,
+    expectStdoutIncludes: '"permissionDecision":"allow"',
   },
   {
     // Defensive String() wrap: even if a future regression binds command to
@@ -60,6 +68,7 @@ const cases = [
     name: 'null command field → no crash',
     input: { tool_name: 'Bash', tool_input: { command: null } },
     expectExit: 0,
+    expectStdoutIncludes: '"permissionDecision":"allow"',
   },
   {
     // The exact #2017 shape: the handler reads `toolInput` (object) instead
@@ -70,20 +79,23 @@ const cases = [
     // non-string and the safety check no-ops, this case fails loudly.
     name: '#2017 shape: snake_case tool_input.command dangerous → BLOCKED',
     input: { tool_name: 'Bash', tool_input: { command: 'rm -rf / --no-preserve-root' } },
-    expectExit: 1,
+    expectExit: 0,
     expectStderrIncludes: '[BLOCKED]',
+    expectStdoutIncludes: '"permissionDecision":"deny"',
   },
   {
     name: 'fork-bomb signature → BLOCKED',
     input: { tool_name: 'Bash', tool_input: { command: ':(){:|:&};:' } },
-    expectExit: 1,
+    expectExit: 0,
     expectStderrIncludes: '[BLOCKED]',
+    expectStdoutIncludes: '"permissionDecision":"deny"',
   },
   {
     name: 'format c: → BLOCKED',
     input: { tool_name: 'Bash', tool_input: { command: 'format c: /q /y' } },
-    expectExit: 1,
+    expectExit: 0,
     expectStderrIncludes: '[BLOCKED]',
+    expectStdoutIncludes: '"permissionDecision":"deny"',
   },
 ];
 
@@ -113,11 +125,12 @@ function runOne(handlerPath, c) {
   if (/\[WARN\] Hook .* encountered an error/.test(err)) {
     fails.push(`handler error swallowed by global catch (regression of #2017): ${err.trim().split('\n')[0]}`);
   }
-  // Also catch the "[OK] Command validated" + dangerous input + exit 0 shape
-  // directly — the form the published 3.6.30 actually printed before the
-  // global-catch warning was added.
-  if (c.expectExit === 1 && /\[OK\] Command validated/.test(out) && r.status === 0) {
-    fails.push('dangerous command produced [OK] + exit 0 (regression of #2017)');
+  // Regression of #2017: a dangerous command that yields an ALLOW decision
+  // (either the JSON allow verdict or the legacy "[OK] Command validated"
+  // text) means the safety gate no longer runs. Keyed off the deny cases.
+  if (c.expectStdoutIncludes === '"permissionDecision":"deny"' &&
+      (/"permissionDecision":"allow"/.test(out) || /\[OK\] Command validated/.test(out + err))) {
+    fails.push('dangerous command was allowed (regression of #2017)');
   }
   return { fails, out, err, status: r.status };
 }
