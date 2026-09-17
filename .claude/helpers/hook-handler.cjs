@@ -447,15 +447,33 @@ const handlers = {
     // re-binds `prompt` or `hookInput.command` to a non-string, `.toLowerCase()`
     // can no longer throw a TypeError that the global try/catch would swallow
     // (silently exiting 0 and letting the dangerous command through).
+    //
+    // Emit a JSON permission decision so this permission hook works in BOTH
+    // runtimes: Claude Code reads `hookSpecificOutput.permissionDecision`, and
+    // Cursor's preToolUse/beforeShellExecution runner requires schema-valid
+    // JSON on stdout — it treats plain text / invalid JSON as a block, so the
+    // old `[OK] Command validated` text blocked every shell command under
+    // Cursor. The flat `permission` mirrors Cursor's native field and is
+    // ignored by Claude Code. The human-readable [OK]/[BLOCKED] markers go to
+    // stderr so they never corrupt the stdout JSON the runners parse.
+    const emit = (decision, marker, reason) => {
+      const out = {
+        permission: decision === 'deny' ? 'deny' : 'allow',
+        hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: decision },
+      };
+      if (reason) out.hookSpecificOutput.permissionDecisionReason = reason;
+      process.stderr.write(`${marker}\n`);
+      console.log(JSON.stringify(out));
+    };
     const cmd = String(hookInput.command || toolInput.command || prompt || '').toLowerCase();
     const dangerous = ['rm -rf /', 'format c:', 'del /s /q c:\\', ':(){:|:&};:'];
     for (const d of dangerous) {
       if (cmd.includes(d)) {
-        console.error(`[BLOCKED] Dangerous command detected: ${d}`);
-        process.exit(1);
+        emit('deny', `[BLOCKED] Dangerous command detected: ${d}`, `Dangerous command detected: ${d}`);
+        return;
       }
     }
-    console.log('[OK] Command validated');
+    emit('allow', '[OK] Command validated');
   },
 
   'post-edit': () => {
